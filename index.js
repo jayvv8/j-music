@@ -9,9 +9,20 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import ytSearch from 'yt-search';
 import express from 'express';
+import axios from 'axios';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { pipeline } from 'node:stream/promises';
+
+const execFileAsync = promisify(execFile);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const JAMENDO_CLIENT_ID = process.env.JAMENDO_CLIENT_ID;
 
 app.get('/', (req, res) => {
   res.send('J Music is online!');
@@ -24,6 +35,95 @@ app.get('/status', (req, res) => {
 app.listen(PORT, () => {
   console.log(`J Music server running on port ${PORT}`);
 });
+
+async function searchJamendo(query) {
+  if (!JAMENDO_CLIENT_ID) {
+    throw new Error('JAMENDO_CLIENT_ID no está configurado.');
+  }
+
+  const response = await axios.get(
+    'https://api.jamendo.com/v3.0/tracks/',
+    {
+      params: {
+        client_id: JAMENDO_CLIENT_ID,
+        format: 'json',
+        limit: 10,
+        search: query,
+        audioformat: 'mp31'
+      },
+      timeout: 20000
+    }
+  );
+
+  const results = response.data?.results || [];
+
+  return results.filter(track =>
+    track.audiodownload_allowed === true &&
+    track.id &&
+    track.name
+  );
+}
+
+async function sendJamendoAudio(sock, jid, msg, query) {
+  const tracks = await searchJamendo(query);
+
+  if (!tracks.length) {
+    await sock.sendMessage(jid, {
+      text: '❌ No encontré una canción descargable con permiso en Jamendo para esa búsqueda.'
+    }, { quoted: msg });
+    return;
+  }
+
+  const track = tracks[0];
+
+  const downloadUrl =
+    `https://api.jamendo.com/v3.0/tracks/file/` +
+    `?client_id=${encodeURIComponent(JAMENDO_CLIENT_ID)}` +
+    `&id=${encodeURIComponent(track.id)}` +
+    `&audioformat=mp31&action=download`;
+
+  const tempDir = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'jmusic-')
+  );
+
+  const inputFile = path.join(tempDir, 'input.mp3');
+  const outputFile = path.join(tempDir, 'output.mp3');
+
+  try {
+    const response = await axios.get(downloadUrl, {
+      responseType: 'stream',
+      maxRedirects: 5,
+      timeout: 60000
+    });
+
+    await pipeline(response.data, fs.createWriteStream(inputFile));
+
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i', inputFile,
+      '-vn',
+      '-acodec', 'libmp3lame',
+      '-b:a', '128k',
+      outputFile
+    ]);
+
+    const audio = await fsp.readFile(outputFile);
+
+    await sock.sendMessage(jid, {
+      audio,
+      mimetype: 'audio/mpeg',
+      fileName: `${track.name}.mp3`,
+      ptt: false
+    }, { quoted: msg });
+
+    await sock.sendMessage(jid, {
+      text: `🎵 *${track.name}*\n👤 ${track.artist_name || 'Artista desconocido'}\n💿 Jamendo\n🔗 ${track.shareurl || ''}`
+    }, { quoted: msg });
+
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true });
+  }
+}
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./session');
@@ -91,7 +191,7 @@ async function startBot() {
 
 Comandos disponibles:
 
-.play <canción> - Buscar en YouTube
+.play <canción> - Buscar y enviar audio
 .ytsearch <canción> - Buscar videos
 .artist <nombre> - Buscar artista
 .lyrics <canción> - Buscar letras
@@ -112,32 +212,10 @@ Ejemplo:
         }
 
         await sock.sendMessage(jid, {
-          text: `🔎 Buscando *${query}* en YouTube...`
+          text: `🔎 Buscando *${query}* en Jamendo...`
         }, { quoted: msg });
 
-        const result = await ytSearch(query);
-        const videos = result.videos || [];
-
-        if (!videos.length) {
-          await sock.sendMessage(jid, {
-            text: '❌ No encontré resultados en YouTube.'
-          }, { quoted: msg });
-          return;
-        }
-
-        const video = videos[0];
-
-        await sock.sendMessage(jid, {
-          text: `🎵 *RESULTADO DE YOUTUBE*
-
-📌 *Título:* ${video.title}
-👤 *Canal:* ${video.author?.name || 'Desconocido'}
-⏱️ *Duración:* ${video.timestamp || 'Desconocida'}
-
-🔗 ${video.url}
-
-_Resultado de búsqueda de J Music._`
-        }, { quoted: msg });
+        await sendJamendoAudio(sock, jid, msg, query);
       }
 
       else if (command === '.ytsearch') {
@@ -223,9 +301,7 @@ Usa .play <canción> para buscar música.`
       }
 
       else if (command === '.ffmpeg') {
-        const { execFile } = await import('node:child_process');
-
-        execFile('ffmpeg', ['-version'], (error, stdout) => {
+        execFile('ffmpeg', ['-version'], (error) => {
           if (error) {
             sock.sendMessage(jid, {
               text: '❌ FFmpeg no está disponible.'
@@ -243,7 +319,8 @@ Usa .play <canción> para buscar música.`
       console.error('Error en comando:', error);
 
       await sock.sendMessage(jid, {
-        text: '❌ Ocurrió un error ejecutando el comando.'
+        text: '❌ Ocurrió un error ejecutando el comando: ' +
+          (error.message || 'Error desconocido')
       }, { quoted: msg });
     }
   });
