@@ -8,12 +8,10 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import ytSearch from 'yt-search';
 import express from 'express';
-
-import fs from 'fs';
-import path from 'path';
+import { execFile } from 'node:child_process';
 
 // ==============================
-// J MUSIC - WHATSAPP MUSIC BOT
+// J MUSIC
 // ==============================
 
 const PREFIX = '.';
@@ -42,14 +40,14 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==============================
-// FUNCIONES
+// BÚSQUEDA DE YOUTUBE
 // ==============================
 
 async function searchYouTube(query) {
   try {
     const results = await ytSearch(query);
 
-    if (!results || !results.videos || results.videos.length === 0) {
+    if (!results?.videos?.length) {
       return null;
     }
 
@@ -61,12 +59,14 @@ async function searchYouTube(query) {
 }
 
 // ==============================
-// BOT
+// INICIAR BOT
 // ==============================
 
 async function startBot() {
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+    const { state, saveCreds } =
+      await useMultiFileAuthState(SESSION_DIR);
+
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -79,11 +79,15 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // ==============================
+    // CONEXIÓN
+    // ==============================
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('Escanea este QR con WhatsApp:');
+        console.log('Escanea el QR con WhatsApp:');
         qrcode.generate(qr, { small: true });
       }
 
@@ -97,9 +101,14 @@ async function startBot() {
 
         if (statusCode !== DisconnectReason.loggedOut) {
           console.log('Conexión cerrada. Reconectando...');
-          startBot();
+
+          setTimeout(() => {
+            startBot();
+          }, 3000);
         } else {
-          console.log('Sesión cerrada. Debes vincular WhatsApp nuevamente.');
+          console.log(
+            'Sesión cerrada. Debes vincular WhatsApp nuevamente.'
+          );
         }
       }
     });
@@ -112,11 +121,12 @@ async function startBot() {
       if (type !== 'notify') return;
 
       const msg = messages[0];
-      if (!msg || !msg.message) return;
 
+      if (!msg?.message) return;
       if (msg.key.fromMe) return;
 
       const jid = msg.key.remoteJid;
+
       if (!jid || jid === 'status@broadcast') return;
 
       const messageContent =
@@ -136,6 +146,43 @@ async function startBot() {
       const query = args.join(' ');
 
       // ==============================
+      // .FFMPEG
+      // ==============================
+
+      if (command === 'ffmpeg') {
+        execFile(
+          'ffmpeg',
+          ['-version'],
+          async (error, stdout) => {
+            if (error) {
+              await sock.sendMessage(
+                jid,
+                {
+                  text: '❌ FFmpeg no está instalado o no está disponible.'
+                },
+                { quoted: msg }
+              );
+
+              return;
+            }
+
+            const versionLine =
+              stdout.split('\n')[0] || 'Versión desconocida';
+
+            await sock.sendMessage(
+              jid,
+              {
+                text: `✅ FFmpeg está instalado y funcionando.\n\n${versionLine}`
+              },
+              { quoted: msg }
+            );
+          }
+        );
+
+        return;
+      }
+
+      // ==============================
       // .HELP
       // ==============================
 
@@ -145,17 +192,22 @@ async function startBot() {
 ┃
 ┃  🎧 COMANDOS MUSICALES
 ┃
-┃  ${PREFIX}play <canción>
-┃  ${PREFIX}ytsearch <canción>
-┃  ${PREFIX}artist <artista>
-┃  ${PREFIX}lyrics <canción>
-┃  ${PREFIX}radio
-┃  ${PREFIX}help
+┃  .play <canción>
+┃  .ytsearch <canción>
+┃  .artist <artista>
+┃  .lyrics <canción>
+┃  .radio
+┃  .ffmpeg
+┃  .help
 ┃
 ╰━━━━━━━━━━━━━━━━━━╯
         `;
 
-        await sock.sendMessage(jid, { text: menu }, { quoted: msg });
+        await sock.sendMessage(
+          jid,
+          { text: menu },
+          { quoted: msg }
+        );
       }
 
       // ==============================
@@ -166,9 +218,12 @@ async function startBot() {
         if (!query) {
           await sock.sendMessage(
             jid,
-            { text: '🎵 Escribe el nombre de una canción.\nEjemplo: .play Bad Bunny' },
+            {
+              text: '🎵 Escribe el nombre de una canción.\nEjemplo: .play Bad Bunny'
+            },
             { quoted: msg }
           );
+
           return;
         }
 
@@ -184,6 +239,7 @@ async function startBot() {
           await sock.sendMessage(jid, {
             text: '❌ No encontré resultados.'
           });
+
           return;
         }
 
@@ -196,12 +252,13 @@ async function startBot() {
 👤 *Canal:* ${video.author?.name || 'Desconocido'}
 ⏱️ *Duración:* ${video.timestamp || 'Desconocida'}
 🔗 *YouTube:* ${video.url}
-
         `;
 
-        await sock.sendMessage(jid, {
-          text: result
-        }, { quoted: msg });
+        await sock.sendMessage(
+          jid,
+          { text: result },
+          { quoted: msg }
+        );
       }
 
       // ==============================
@@ -212,9 +269,12 @@ async function startBot() {
         if (!query) {
           await sock.sendMessage(
             jid,
-            { text: '🔎 Escribe lo que deseas buscar.\nEjemplo: .ytsearch Romeo Santos' },
+            {
+              text: '🔎 Escribe lo que deseas buscar.\nEjemplo: .ytsearch Romeo Santos'
+            },
             { quoted: msg }
           );
+
           return;
         }
 
@@ -224,6 +284,7 @@ async function startBot() {
           await sock.sendMessage(jid, {
             text: '❌ No encontré resultados.'
           });
+
           return;
         }
 
@@ -241,9 +302,11 @@ ${index + 1}. 🎵 ${video.title}
 `;
         });
 
-        await sock.sendMessage(jid, {
-          text: response
-        }, { quoted: msg });
+        await sock.sendMessage(
+          jid,
+          { text: response },
+          { quoted: msg }
+        );
       }
 
       // ==============================
@@ -254,9 +317,12 @@ ${index + 1}. 🎵 ${video.title}
         if (!query) {
           await sock.sendMessage(
             jid,
-            { text: '🎤 Escribe el nombre del artista.\nEjemplo: .artist Eladio Carrión' },
+            {
+              text: '🎤 Escribe el nombre del artista.\nEjemplo: .artist Eladio Carrión'
+            },
             { quoted: msg }
           );
+
           return;
         }
 
@@ -266,10 +332,12 @@ ${index + 1}. 🎵 ${video.title}
           await sock.sendMessage(jid, {
             text: '❌ No encontré canciones de ese artista.'
           });
+
           return;
         }
 
-        let response = `🎤 *MÚSICA DE ${query.toUpperCase()}*\n\n`;
+        let response =
+          `🎤 *MÚSICA DE ${query.toUpperCase()}*\n\n`;
 
         videos.slice(0, 5).forEach((video, index) => {
           response += `
@@ -280,9 +348,11 @@ ${index + 1}. 🎵 ${video.title}
 `;
         });
 
-        await sock.sendMessage(jid, {
-          text: response
-        }, { quoted: msg });
+        await sock.sendMessage(
+          jid,
+          { text: response },
+          { quoted: msg }
+        );
       }
 
       // ==============================
@@ -293,9 +363,12 @@ ${index + 1}. 🎵 ${video.title}
         if (!query) {
           await sock.sendMessage(
             jid,
-            { text: '📝 Escribe el nombre de una canción.\nEjemplo: .lyrics Tití Me Preguntó' },
+            {
+              text: '📝 Escribe el nombre de una canción.\nEjemplo: .lyrics Tití Me Preguntó'
+            },
             { quoted: msg }
           );
+
           return;
         }
 
@@ -323,9 +396,11 @@ Escucha emisoras en línea:
 🎵 Busca emisoras de todo el mundo.
         `;
 
-        await sock.sendMessage(jid, {
-          text: radioText
-        }, { quoted: msg });
+        await sock.sendMessage(
+          jid,
+          { text: radioText },
+          { quoted: msg }
+        );
       }
 
       // ==============================
@@ -345,6 +420,10 @@ Escucha emisoras en línea:
 
   } catch (error) {
     console.error('Error al iniciar J Music:', error);
+
+    setTimeout(() => {
+      startBot();
+    }, 5000);
   }
 }
 
