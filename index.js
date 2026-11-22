@@ -1,3 +1,4 @@
+
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -8,537 +9,246 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import ytSearch from 'yt-search';
 import express from 'express';
-import axios from 'axios';
-
-import { execFile } from 'node:child_process';
-import fs from 'node:fs';
-import fsp from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
-
-// ======================================
-// J MUSIC
-// ======================================
-
-const PREFIX = '.';
-const SESSION_DIR = './session';
-
-// ======================================
-// SERVIDOR PARA RENDER
-// ======================================
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.status(200).send('🎵 J Music está funcionando.');
+  res.send('J Music is online!');
 });
 
 app.get('/status', (req, res) => {
-  res.status(200).json({
-    bot: 'J Music',
-    status: 'online'
-  });
+  res.json({ status: 'online', bot: 'J Music' });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor HTTP activo en el puerto ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`J Music server running on port ${PORT}`);
 });
-
-// ======================================
-// BÚSQUEDA YOUTUBE
-// ======================================
-
-async function searchYouTube(query) {
-  try {
-    const results = await ytSearch(query);
-
-    if (!results?.videos?.length) return null;
-
-    return results.videos;
-  } catch (error) {
-    console.error('Error buscando YouTube:', error);
-    return null;
-  }
-}
-
-// ======================================
-// BÚSQUEDA EN INTERNET ARCHIVE
-// ======================================
-
-async function searchArchive(query) {
-  try {
-    const response = await axios.get(
-      'https://archive.org/advancedsearch.php',
-      {
-        params: {
-          q: `title:"${query}" AND mediatype:audio`,
-          'fl[]': ['identifier', 'title', 'creator'],
-          rows: 10,
-          page: 1,
-          output: 'json'
-        },
-        timeout: 20000
-      }
-    );
-
-    return response.data?.response?.docs || [];
-  } catch (error) {
-    console.error('Error buscando Archive:', error.message);
-    return [];
-  }
-}
-
-// ======================================
-// OBTENER AUDIO DESCARGABLE
-// ======================================
-
-async function getArchiveAudio(identifier) {
-  try {
-    const response = await axios.get(
-      `https://archive.org/metadata/${encodeURIComponent(identifier)}`,
-      { timeout: 20000 }
-    );
-
-    const files = response.data?.files || [];
-
-    const audioFiles = files.filter(file => {
-      const name = String(file.name || '').toLowerCase();
-      const format = String(file.format || '').toLowerCase();
-
-      return (
-        name.endsWith('.mp3') &&
-        format.includes('mp3') &&
-        !file.source
-      );
-    });
-
-    if (!audioFiles.length) return null;
-
-    // Elegir el archivo MP3 de menor tamaño razonable.
-    const usable = audioFiles
-      .filter(file => Number(file.size || 0) > 0)
-      .sort((a, b) => Number(a.size) - Number(b.size));
-
-    return usable[0] || audioFiles[0];
-  } catch (error) {
-    console.error('Error obteniendo audio:', error.message);
-    return null;
-  }
-}
-
-// ======================================
-// DESCARGAR Y CONVERTIR A MP3
-// ======================================
-
-async function downloadAndConvert(identifier, filename) {
-  const tempDir = await fsp.mkdtemp(
-    path.join(os.tmpdir(), 'jmusic-')
-  );
-
-  const inputPath = path.join(tempDir, 'audio-input');
-  const outputPath = path.join(tempDir, 'audio.mp3');
-
-  try {
-    const downloadUrl =
-      `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeURIComponent(filename)}`;
-
-    const response = await axios.get(downloadUrl, {
-      responseType: 'stream',
-      timeout: 60000,
-      maxRedirects: 5
-    });
-
-    await pipeline(response.data, fs.createWriteStream(inputPath));
-
-    await new Promise((resolve, reject) => {
-      execFile(
-        'ffmpeg',
-        [
-          '-y',
-          '-i', inputPath,
-          '-vn',
-          '-acodec', 'libmp3lame',
-          '-b:a', '128k',
-          outputPath
-        ],
-        { timeout: 120000 },
-        (error) => {
-          if (error) reject(error);
-          else resolve();
-        }
-      );
-    });
-
-    return await fsp.readFile(outputPath);
-  } finally {
-    await fsp.rm(tempDir, {
-      recursive: true,
-      force: true
-    }).catch(() => {});
-  }
-}
-
-// ======================================
-// INICIAR WHATSAPP
-// ======================================
 
 async function startBot() {
-  try {
-    const { state, saveCreds } =
-      await useMultiFileAuthState(SESSION_DIR);
+  const { state, saveCreds } = await useMultiFileAuthState('./session');
+  const { version } = await fetchLatestBaileysVersion();
 
-    const { version } = await fetchLatestBaileysVersion();
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    browser: ['J Music', 'Chrome', '1.0.0']
+  });
 
-    const sock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({ level: 'silent' }),
-      browser: ['J Music', 'Chrome', '1.0.0'],
-      markOnlineOnConnect: false
-    });
+  sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-    // ==================================
-    // CONEXIÓN
-    // ==================================
+    if (qr) {
+      console.log('Escanea este QR para conectar J Music:');
+      qrcode.generate(qr, { small: true });
+    }
 
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+    if (connection === 'open') {
+      console.log('J Music conectado a WhatsApp');
+    }
 
-      if (qr) {
-        console.log('Escanea el QR con WhatsApp:');
-        qrcode.generate(qr, { small: true });
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+
+      if (code !== DisconnectReason.loggedOut) {
+        console.log('Conexión perdida. Reconectando...');
+        startBot();
+      } else {
+        console.log('Sesión cerrada. Necesitas vincular nuevamente.');
       }
+    }
+  });
 
-      if (connection === 'open') {
-        console.log('J Music conectado correctamente.');
-      }
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
 
-      if (connection === 'close') {
-        const statusCode =
-          lastDisconnect?.error?.output?.statusCode;
+    const msg = messages[0];
+    if (!msg?.message || msg.key.fromMe) return;
 
-        if (statusCode !== DisconnectReason.loggedOut) {
-          console.log('Conexión cerrada. Reconectando...');
+    const jid = msg.key.remoteJid;
+    if (!jid || jid.endsWith('@newsletter')) return;
 
-          setTimeout(() => startBot(), 3000);
-        } else {
-          console.log('Sesión cerrada. Vincula WhatsApp nuevamente.');
-        }
-      }
-    });
+    const messageContent =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      '';
 
-    // ==================================
-    // MENSAJES
-    // ==================================
+    const commandText = messageContent.trim();
+    if (!commandText.startsWith('.')) return;
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
+    const args = commandText.split(/\s+/);
+    const command = args.shift().toLowerCase();
+    const query = args.join(' ').trim();
 
-      const msg = messages[0];
-
-      if (!msg?.message || msg.key.fromMe) return;
-
-      const jid = msg.key.remoteJid;
-
-      if (!jid || jid === 'status@broadcast') return;
-
-      const messageContent =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
-        '';
-
-      const text = messageContent.trim();
-
-      if (!text.startsWith(PREFIX)) return;
-
-      const commandText = text.slice(PREFIX.length).trim();
-      const args = commandText.split(/\s+/);
-      const command = args.shift()?.toLowerCase();
-      const query = args.join(' ');
-
-      // ==================================
-      // .FFMPEG
-      // ==================================
-
-      if (command === 'ffmpeg') {
-        execFile('ffmpeg', ['-version'], async (error, stdout) => {
-          if (error) {
-            await sock.sendMessage(jid, {
-              text: '❌ FFmpeg no está instalado.'
-            }, { quoted: msg });
-
-            return;
-          }
-
-          await sock.sendMessage(jid, {
-            text: `✅ FFmpeg funcionando.\n\n${stdout.split('\n')[0]}`
-          }, { quoted: msg });
-        });
-
-        return;
-      }
-
-      // ==================================
-      // .HELP
-      // ==================================
-
-      if (command === 'help' || command === 'menu') {
-        const menu = `
-╭━━━〔 🎵 J MUSIC 〕━━━╮
-┃
-┃ 🎧 COMANDOS
-┃
-┃ .play <canción>
-┃ .ytsearch <canción>
-┃ .artist <artista>
-┃ .lyrics <canción>
-┃ .radio
-┃ .ffmpeg
-┃ .help
-┃
-╰━━━━━━━━━━━━━━━━━━╯
-        `;
-
+    try {
+      if (command === '.help') {
         await sock.sendMessage(jid, {
-          text: menu
+          text: `🎵 *J MUSIC*
+
+Comandos disponibles:
+
+.play <canción> - Buscar en YouTube
+.ytsearch <canción> - Buscar videos
+.artist <nombre> - Buscar artista
+.lyrics <canción> - Buscar letras
+.radio - Información de radio
+.ffmpeg - Comprobar FFmpeg
+
+Ejemplo:
+.play Paz Mental`
         }, { quoted: msg });
       }
 
-      // ==================================
-      // .PLAY
-      // ==================================
-
-      else if (command === 'play') {
+      else if (command === '.play') {
         if (!query) {
           await sock.sendMessage(jid, {
-            text: '🎵 Escribe una canción.\nEjemplo: .play Paz Mental'
+            text: 'Escribe una canción.\nEjemplo: .play Paz Mental'
           }, { quoted: msg });
-
           return;
         }
 
         await sock.sendMessage(jid, {
-          text: `🔎 Buscando *${query}*...`
+          text: `🔎 Buscando *${query}* en YouTube...`
         }, { quoted: msg });
 
-        try {
-          const results = await searchArchive(query);
+        const result = await ytSearch(query);
+        const videos = result.videos || [];
 
-          if (!results.length) {
-            await sock.sendMessage(jid, {
-              text: '❌ No encontré audio descargable para esa búsqueda.'
-            }, { quoted: msg });
-
-            return;
-          }
-
-          let selected = null;
-          let selectedFile = null;
-
-          for (const item of results.slice(0, 5)) {
-            const file = await getArchiveAudio(item.identifier);
-
-            if (file) {
-              selected = item;
-              selectedFile = file;
-              break;
-            }
-          }
-
-          if (!selected || !selectedFile) {
-            await sock.sendMessage(jid, {
-              text: '❌ No encontré un archivo MP3 descargable.'
-            }, { quoted: msg });
-
-            return;
-          }
-
-          if (
-            Number(selectedFile.size || 0) >
-            40 * 1024 * 1024
-          ) {
-            await sock.sendMessage(jid, {
-              text: '❌ El archivo es demasiado grande para procesarlo aquí.'
-            }, { quoted: msg });
-
-            return;
-          }
-
+        if (!videos.length) {
           await sock.sendMessage(jid, {
-            text: '⬇️ Preparando el audio...'
+            text: '❌ No encontré resultados en YouTube.'
           }, { quoted: msg });
-
-          const audioBuffer = await downloadAndConvert(
-            selected.identifier,
-            selectedFile.name
-          );
-
-          if (audioBuffer.length > 40 * 1024 * 1024) {
-            await sock.sendMessage(jid, {
-              text: '❌ El MP3 convertido es demasiado grande.'
-            }, { quoted: msg });
-
-            return;
-          }
-
-          await sock.sendMessage(
-            jid,
-            {
-              audio: audioBuffer,
-              mimetype: 'audio/mpeg',
-              fileName: `${query.replace(/[^\w\s-]/g, '').slice(0, 60)}.mp3`
-            },
-            { quoted: msg }
-          );
-
-        } catch (error) {
-          console.error('Error en .play:', error);
-
-          await sock.sendMessage(jid, {
-            text: '❌ Ocurrió un error al obtener o procesar el audio.'
-          }, { quoted: msg });
-        }
-      }
-
-      // ==================================
-      // .YTSEARCH
-      // ==================================
-
-      else if (command === 'ytsearch') {
-        if (!query) {
-          await sock.sendMessage(jid, {
-            text: '🔎 Escribe lo que deseas buscar.\nEjemplo: .ytsearch Romeo Santos'
-          }, { quoted: msg });
-
           return;
         }
 
-        const videos = await searchYouTube(query);
+        const video = videos[0];
 
-        if (!videos) {
+        await sock.sendMessage(jid, {
+          text: `🎵 *RESULTADO DE YOUTUBE*
+
+📌 *Título:* ${video.title}
+👤 *Canal:* ${video.author?.name || 'Desconocido'}
+⏱️ *Duración:* ${video.timestamp || 'Desconocida'}
+
+🔗 ${video.url}
+
+_Resultado de búsqueda de J Music._`
+        }, { quoted: msg });
+      }
+
+      else if (command === '.ytsearch') {
+        if (!query) {
+          await sock.sendMessage(jid, {
+            text: 'Escribe qué quieres buscar.\nEjemplo: .ytsearch Romeo Santos'
+          }, { quoted: msg });
+          return;
+        }
+
+        const result = await ytSearch(query);
+        const videos = result.videos || [];
+
+        if (!videos.length) {
           await sock.sendMessage(jid, {
             text: '❌ No encontré resultados.'
-          });
-
+          }, { quoted: msg });
           return;
         }
 
-        let response = '🔎 *RESULTADOS DE YOUTUBE*\n\n';
-
-        videos.slice(0, 5).forEach((video, index) => {
-          response += `
-${index + 1}. 🎵 ${video.title}
-👤 ${video.author?.name || 'Desconocido'}
-⏱️ ${video.timestamp || 'Desconocido'}
-🔗 ${video.url}
-
-`;
-        });
+        const list = videos.slice(0, 5).map((video, i) =>
+          `${i + 1}. ${video.title}\n👤 ${video.author?.name || 'Desconocido'}\n⏱️ ${video.timestamp || 'N/A'}\n🔗 ${video.url}`
+        ).join('\n\n');
 
         await sock.sendMessage(jid, {
-          text: response
+          text: `🔎 *RESULTADOS DE YOUTUBE*\n\n${list}`
         }, { quoted: msg });
       }
 
-      // ==================================
-      // .ARTIST
-      // ==================================
-
-      else if (command === 'artist') {
+      else if (command === '.artist') {
         if (!query) {
           await sock.sendMessage(jid, {
-            text: '🎤 Escribe el nombre del artista.\nEjemplo: .artist Eladio Carrión'
+            text: 'Escribe el nombre de un artista.'
           }, { quoted: msg });
-
           return;
         }
 
-        const videos = await searchYouTube(`${query} canciones`);
+        const result = await ytSearch(`${query} canciones`);
+        const videos = result.videos || [];
 
-        if (!videos) {
+        if (!videos.length) {
           await sock.sendMessage(jid, {
-            text: '❌ No encontré canciones.'
-          });
-
+            text: '❌ No encontré resultados para ese artista.'
+          }, { quoted: msg });
           return;
         }
 
-        let response = `🎤 *MÚSICA DE ${query.toUpperCase()}*\n\n`;
-
-        videos.slice(0, 5).forEach((video, index) => {
-          response += `
-${index + 1}. 🎵 ${video.title}
-⏱️ ${video.timestamp || 'Desconocido'}
-🔗 ${video.url}
-
-`;
-        });
+        const list = videos.slice(0, 5).map((video, i) =>
+          `${i + 1}. ${video.title}\n🔗 ${video.url}`
+        ).join('\n\n');
 
         await sock.sendMessage(jid, {
-          text: response
+          text: `🎤 *ARTISTA: ${query}*\n\n${list}`
         }, { quoted: msg });
       }
 
-      // ==================================
-      // .LYRICS
-      // ==================================
-
-      else if (command === 'lyrics') {
+      else if (command === '.lyrics') {
         if (!query) {
           await sock.sendMessage(jid, {
-            text: '📝 Escribe el nombre de una canción.'
+            text: 'Escribe el nombre de una canción.'
           }, { quoted: msg });
-
           return;
         }
 
+        const result = await ytSearch(`${query} lyrics`);
+        const video = result.videos?.[0];
+
         await sock.sendMessage(jid, {
-          text: `📝 La función de letras para *${query}* todavía no está activada.`
+          text: video
+            ? `📝 *BÚSQUEDA DE LETRAS*\n\n${query}\n\n🔎 Puedes buscar la letra aquí:\nhttps://genius.com/search?q=${encodeURIComponent(query)}\n\n🎵 Video relacionado:\n${video.url}`
+            : `📝 Busca la letra aquí:\nhttps://genius.com/search?q=${encodeURIComponent(query)}`
         }, { quoted: msg });
       }
 
-      // ==================================
-      // .RADIO
-      // ==================================
-
-      else if (command === 'radio') {
+      else if (command === '.radio') {
         await sock.sendMessage(jid, {
-          text: `
-📻 *J MUSIC - RADIO*
+          text: `📻 *J MUSIC RADIO*
 
-🌐 https://www.radio-browser.info/
+La función de radio continua está en desarrollo.
 
-🎵 Busca emisoras de todo el mundo.
-          `
+Usa .play <canción> para buscar música.`
         }, { quoted: msg });
       }
 
-      // ==================================
-      // COMANDO DESCONOCIDO
-      // ==================================
+      else if (command === '.ffmpeg') {
+        const { execFile } = await import('node:child_process');
 
-      else {
-        await sock.sendMessage(jid, {
-          text: `❌ Comando desconocido.\nEscribe ${PREFIX}help.`
-        }, { quoted: msg });
+        execFile('ffmpeg', ['-version'], (error, stdout) => {
+          if (error) {
+            sock.sendMessage(jid, {
+              text: '❌ FFmpeg no está disponible.'
+            }, { quoted: msg });
+            return;
+          }
+
+          sock.sendMessage(jid, {
+            text: '✅ FFmpeg está instalado y funcionando.'
+          }, { quoted: msg });
+        });
       }
-    });
 
-  } catch (error) {
-    console.error('Error al iniciar J Music:', error);
+    } catch (error) {
+      console.error('Error en comando:', error);
 
-    setTimeout(() => startBot(), 5000);
-  }
+      await sock.sendMessage(jid, {
+        text: '❌ Ocurrió un error ejecutando el comando.'
+      }, { quoted: msg });
+    }
+  });
 }
 
-// ======================================
-// INICIAR
-// ======================================
-
-startBot();
+startBot().catch(err => {
+  console.error('Error iniciando J Music:', err);
+});
