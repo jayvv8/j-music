@@ -36,6 +36,11 @@ app.listen(PORT, () => {
   console.log(`J Music server running on port ${PORT}`);
 });
 
+async function searchYouTube(query) {
+  const result = await ytSearch(query);
+  return result.videos || [];
+}
+
 async function searchJamendo(query) {
   if (!JAMENDO_CLIENT_ID) {
     throw new Error('JAMENDO_CLIENT_ID no está configurado.');
@@ -64,13 +69,18 @@ async function searchJamendo(query) {
   );
 }
 
-async function sendJamendoAudio(sock, jid, msg, query) {
+async function sendJamendoAudio(sock, jid, msg, query, video) {
   const tracks = await searchJamendo(query);
 
   if (!tracks.length) {
     await sock.sendMessage(jid, {
-      text: '❌ No encontré una canción descargable con permiso en Jamendo para esa búsqueda.'
+      text:
+        '❌ No encontré audio descargable en Jamendo para esta canción.\n\n' +
+        (video
+          ? `🎵 Resultado de YouTube:\n${video.title}\n${video.url}`
+          : 'No encontré resultados de YouTube tampoco.')
     }, { quoted: msg });
+
     return;
   }
 
@@ -117,7 +127,14 @@ async function sendJamendoAudio(sock, jid, msg, query) {
     }, { quoted: msg });
 
     await sock.sendMessage(jid, {
-      text: `🎵 *${track.name}*\n👤 ${track.artist_name || 'Artista desconocido'}\n💿 Jamendo\n🔗 ${track.shareurl || ''}`
+      text:
+        `🎵 *${track.name}*\n` +
+        `👤 ${track.artist_name || 'Artista desconocido'}\n` +
+        `💿 Fuente de audio: Jamendo\n` +
+        `🔗 ${track.shareurl || ''}\n\n` +
+        (video
+          ? `🔎 *Resultado de YouTube:*\n${video.title}\n${video.url}`
+          : 'No se encontró un resultado de YouTube.')
     }, { quoted: msg });
 
   } finally {
@@ -212,10 +229,29 @@ Ejemplo:
         }
 
         await sock.sendMessage(jid, {
-          text: `🔎 Buscando *${query}* en Jamendo...`
+          text: `🔎 Buscando *${query}* en YouTube...`
         }, { quoted: msg });
 
-        await sendJamendoAudio(sock, jid, msg, query);
+        const videos = await searchYouTube(query);
+        const video = videos[0] || null;
+
+        if (video) {
+          await sock.sendMessage(jid, {
+            text:
+              `🎬 *RESULTADO DE YOUTUBE*\n\n` +
+              `🎵 ${video.title}\n` +
+              `👤 ${video.author?.name || 'Desconocido'}\n` +
+              `⏱️ ${video.timestamp || 'N/A'}\n` +
+              `🔗 ${video.url}\n\n` +
+              `🔎 Buscando audio descargable...`
+          }, { quoted: msg });
+        } else {
+          await sock.sendMessage(jid, {
+            text: '⚠️ No encontré en YouTube. Intentaré buscar el audio...'
+          }, { quoted: msg });
+        }
+
+        await sendJamendoAudio(sock, jid, msg, query, video);
       }
 
       else if (command === '.ytsearch') {
@@ -226,8 +262,7 @@ Ejemplo:
           return;
         }
 
-        const result = await ytSearch(query);
-        const videos = result.videos || [];
+        const videos = await searchYouTube(query);
 
         if (!videos.length) {
           await sock.sendMessage(jid, {
@@ -253,8 +288,7 @@ Ejemplo:
           return;
         }
 
-        const result = await ytSearch(`${query} canciones`);
-        const videos = result.videos || [];
+        const videos = await searchYouTube(`${query} canciones`);
 
         if (!videos.length) {
           await sock.sendMessage(jid, {
@@ -280,8 +314,8 @@ Ejemplo:
           return;
         }
 
-        const result = await ytSearch(`${query} lyrics`);
-        const video = result.videos?.[0];
+        const videos = await searchYouTube(`${query} lyrics`);
+        const video = videos[0];
 
         await sock.sendMessage(jid, {
           text: video
